@@ -1,0 +1,8 @@
+{
+  "name": "smogon-sheets",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "record-fixtures": "node test/record-fixtures.js"
+  }
+}
