@@ -1,10 +1,19 @@
-// Test harness: runs OGCode.js unmodified inside a vm sandbox with in-memory
-// fakes for SpreadsheetApp and UrlFetchApp.
+// Test harness: runs the Apps Script files unmodified inside a vm sandbox with in-memory
+// fakes for SpreadsheetApp, UrlFetchApp (serving Smogon pages from a map) and PropertiesService.
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const SCRIPT_PATH = path.join(__dirname, "..", "OGCode.js");
+// Every file in the Apps Script project, loaded into one context like Apps Script's shared global scope.
+const SCRIPT_FILES = ["Shared.js", "OGCode.js", "Code.js"];
+
+function loadScripts(globals) {
+  const context = vm.createContext({ console: { ...console, log() {} }, ...globals });
+  for (const file of SCRIPT_FILES) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "..", file), "utf8"), context, { filename: file });
+  }
+  return context;
+}
 
 // ---------- CSV ----------
 
@@ -96,6 +105,10 @@ class FakeSheet {
     }
     return last;
   }
+  clearContents() {
+    this.grid = [];
+    return this;
+  }
   getRange(row, column, numRows = 1, numColumns = 1) {
     for (const [label, v] of [["row", row], ["column", column], ["number of rows", numRows], ["number of columns", numColumns]]) {
       if (!Number.isInteger(v) || v < 1) {
@@ -145,6 +158,11 @@ class FakeRange {
     });
     return this;
   }
+  setNumberFormat(format) {
+    this.numberFormat = format;
+    this.sheet.numberFormats = (this.sheet.numberFormats || []).concat(format);
+    return this;
+  }
   clearContent() {
     for (let r = 0; r < this.numRows; r++) {
       for (let c = 0; c < this.numColumns; c++) {
@@ -162,21 +180,58 @@ class FakeSpreadsheet {
   getSheetByName(name) {
     return this.sheets.get(name) || null;
   }
+  insertSheet(name) {
+    if (this.sheets.has(name)) throw new Error(`A sheet with the name "${name}" already exists`);
+    const sheet = new FakeSheet(name);
+    this.sheets.set(name, sheet);
+    return sheet;
+  }
 }
 
-// ---------- Fake UrlFetchApp ----------
+// ---------- Fake UrlFetchApp / PropertiesService ----------
 
-function makeUrlFetchApp(pages) {
-  const fetched = [];
+const TOKEN = "test-token";
+
+// What Smogon serves without a valid scraper token.
+const GATE_PAGE =
+  '<!DOCTYPE html><html><head><title>Smogon Forums</title></head><body><p id="m">Checking your browser...</p>' +
+  '<script>document.cookie = "xf_smogon_gate=" + n;</script></body></html>';
+
+// Serves pages[plainUrl] when the request carries ?/&__scraper-token=<token> (the gate page otherwise),
+// and 404 for unknown URLs. `requests` records every URL requested, token included.
+function makeUrlFetchApp(pages, token = TOKEN) {
+  const requests = [];
+  const response = (code, body) => ({ getResponseCode: () => code, getContentText: () => body });
+  function respond(request) {
+    const url = typeof request === "string" ? request : request.url;
+    requests.push(url);
+    const m = url.match(/[?&]__scraper-token=([^&]*)$/);
+    if (!m || decodeURIComponent(m[1]) !== token) return response(200, GATE_PAGE);
+    const plain = url.slice(0, m.index);
+    return plain in pages ? response(200, pages[plain]) : response(404, "<html>Not found</html>");
+  }
   return {
-    fetched,
-    fetch(url) {
-      fetched.push(url);
-      if (!(url in pages)) throw new Error(`Unexpected fetch (no fixture): ${url}`);
-      const body = pages[url];
-      return { getContentText: () => body };
-    },
+    requests,
+    fetch: (url) => respond(url),
+    fetchAll: (requestList) => requestList.map(respond),
   };
+}
+
+function makePropertiesService(properties) {
+  return { getScriptProperties: () => ({ getProperty: (key) => (key in properties ? properties[key] : null) }) };
+}
+
+// The Apps Script project against an in-memory workbook and Smogon. Smogon only accepts `token`;
+// the script properties hold `scriptToken` (default: the right one, null: not set).
+function appsScript({ sheets = {}, pages = {}, token = TOKEN, scriptToken = token } = {}) {
+  const spreadsheet = new FakeSpreadsheet(sheets);
+  const urlFetchApp = makeUrlFetchApp(pages, token);
+  const scripts = loadScripts({
+    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet },
+    UrlFetchApp: urlFetchApp,
+    PropertiesService: makePropertiesService(scriptToken === null ? {} : { SMOGON_SCRAPER_TOKEN: scriptToken }),
+  });
+  return { spreadsheet, scripts, requests: urlFetchApp.requests };
 }
 
 // ---------- Fixture builders ----------
@@ -235,27 +290,29 @@ function diffGrids(actual, expected) {
 
 // ---------- Runner ----------
 
-function runFillOGSheet({ sheets, pages }) {
-  const spreadsheet = new FakeSpreadsheet(sheets);
-  const urlFetchApp = makeUrlFetchApp(pages);
-  const context = vm.createContext({
-    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet },
-    UrlFetchApp: urlFetchApp,
-    console,
-  });
-  vm.runInContext(fs.readFileSync(SCRIPT_PATH, "utf8"), context, { filename: "OGCode.js" });
-  context.fillOGSheet();
-  return { spreadsheet, fetched: urlFetchApp.fetched };
+// Runs a circuit's entry point - by default updateOGSheet (fetch pages, then fill) - against `pages` on Smogon.
+function runCircuit({ sheets, pages }, { entry = "updateOGSheet" } = {}) {
+  const run = appsScript({ sheets, pages });
+  run.scripts[entry]();
+  return run;
 }
+
+const runFillOGSheet = (workbook) => runCircuit(workbook);
 
 module.exports = {
   parseCsv,
   loadCsvGrid,
   FakeSheet,
   FakeSpreadsheet,
+  appsScript,
+  makeUrlFetchApp,
+  TOKEN,
+  GATE_PAGE,
   threadPage,
   forumListingPage,
   addForumPages,
+  loadScripts,
+  runCircuit,
   runFillOGSheet,
   diffGrids,
   SMOGON,
