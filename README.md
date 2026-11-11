@@ -35,7 +35,10 @@ test/       Node tests that run the Apps Script files unmodified
 **Fetching** (`fetchCircuitPages(backstageSheet, pagesSheet)` in `Shared.js`):
 
 1. Reads the tournament blocks from Backstage and downloads each forum's first 4 listing pages, keeping only the thread links.
-2. Finds each tournament's round threads in those links (`extractURLs`, see below) and downloads them, 10 at a time with `UrlFetchApp.fetchAll`, keeping only each thread's first post.
+2. Finds each tournament's round threads in those links (`extractURLs`, see below) and downloads them, 10 at a time with `UrlFetchApp.fetchAll`, keeping only the post with the round's matchups. That's normally the first post.
+   - Some hosts post the matchups as a reply, for example a swiss stage whose first post only has rules and seeding. When the first post has no matchups, the script uses the **thread author's** first later post that does, fetching further pages one at a time only until it finds one. Other players' replies are ignored.
+   - If no post has matchups, the first post is kept.
+   - A swiss stage counts as a single round: everyone in its first round reached the top 32 (or whatever its size is), and the next thread (e.g. the top 16) is the next round.
 3. Replaces the Pages sheet with `[URL, CONTENT]` rows, written as plain text. A page longer than one cell (50,000 characters) is split across several rows with the same URL.
    - Every request has `__scraper-token=<token>` added. Smogon lets those requests through its browser check.
    - The Pages sheet stores plain URLs, never the token.
@@ -46,7 +49,7 @@ test/       Node tests that run the Apps Script files unmodified
 1. **Find the round threads.** For each tournament block in Backstage, it reads the forum listing pages and picks out the threads whose URL contains the tournament's string (`extractURLs`). Sign-up, `page-` and `cycle` threads are skipped, and so are threads older than the oldest thread number.
    - The rounds are sorted by **thread number**, newest first. The forum sorts by latest reply, so its order can't be trusted.
    - The sorted URLs are written back to the block's URL column.
-2. **Parse each round's first post** (`getPlayersForRound`, `getPlayersFromMessage`). Every Smogon member link becomes `[name, score, id, isWinner]`.
+2. **Parse each round's stored post** (`getPlayersForRound`, `getPlayersFromMessage`): the post with the matchups, saved by the fetch. Every Smogon member link becomes `[name, score, id, isWinner, aboveLosers]`.
    - A bolded name (`data-username="[B]…"`) is the winner of that match.
    - Players above the word "losers" are in the winners bracket.
    - Players in a match that hasn't been played yet, like `(Winner of A vs B)`, aren't counted for that round, unless their name is underlined.
@@ -102,8 +105,8 @@ npm test
 
 No dependencies; this uses Node's built-in test runner (Node 20+). `test/harness.js` loads `Shared.js`, `OGCode.js` and `Code.js` into one sandbox, like Apps Script's shared namespace. It uses in-memory stand-ins for the spreadsheet, `PropertiesService`, and a fake Smogon (`UrlFetchApp`) that serves a test's pages only to requests carrying the right token.
 
-- **`scenarios.test.js`:** small hand-built tournaments, each run end to end (fetch, then fill) through **both** `updateOGSheet` and `updateSheet`. They cover finals, unfinished rounds, pending matches, double elimination, byes, seeding lists, late replies, renames and stale rows. There are also tests that each circuit only touches its own sheets.
+- **`scenarios.test.js`:** small hand-built tournaments, each run end to end (fetch, then fill) through **both** `updateOGSheet` and `updateSheet`. They cover finals, unfinished rounds, pending matches, double elimination (including a losers round in progress), byes, seeding lists, matchups posted as a reply (swiss stage), late replies, renames and stale rows. There are also tests that each circuit only touches its own sheets.
 - **`fillOGSheet.real.test.js`:** real OG Backstage input plus saved Smogon posts (`test/fixtures/real/`) must reproduce the saved Tournaments and Circuit sheets exactly. If you change scoring on purpose, check the difference and then update those CSVs. There is no real-data test for CG yet.
-- **`fetch.test.js`:** fetching. It checks the requests made and what's stored, splitting long pages, and the errors for a missing or wrong token or a missing page.
+- **`fetch.test.js`:** fetching. It checks the requests made and what's stored, splitting long pages, finding matchups in the host's replies (fetching later pages only as needed), and the errors for a missing or wrong token or a missing page.
 
 `SMOGON_SCRAPER_TOKEN=<token> npm run record-fixtures` re-downloads the real OG data from the live sheet and Smogon.

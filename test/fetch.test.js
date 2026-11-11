@@ -2,7 +2,7 @@
 // sheet, and readPage() reading it back.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { appsScript, threadPage, forumListingPage, TOKEN, SMOGON } = require("./harness");
+const { appsScript, threadPage, threadPageWithPosts, forumListingPage, TOKEN, SMOGON } = require("./harness");
 
 const FORUM = SMOGON + "/forums/forums/smogon-metagames-circuits.474/";
 const URL_END = "?prefix_id=412";
@@ -171,4 +171,54 @@ test("a fetch replaces earlier pages, and a fill in the same run reads the new o
 test("readPage explains a missing pages sheet", () => {
   const { scripts } = appsScript();
   assert.throws(() => scripts.readPage("https://a/", "OG Pages"), /No "OG Pages" sheet - run this circuit's fetch first/);
+});
+
+// ---------- Matchups posted as a reply (e.g. a swiss stage) ----------
+
+const SEEDING = "<b>Rules</b><br />Seeding:<br />#1 - " + playerLink(1, "Alice") + "<br />#2 - " + playerLink(9, "Gus");
+const SWISS_1 = "Swiss Round 1<br />#1 - " + playerLink(1, "Alice") + " vs #4 - " + playerLink(2, "Bob");
+const pageLink = (url, n) => `<a href="${url.replace(SMOGON, "")}page-${n}">${n}</a>`;
+const storedPost = (scripts) => scripts.firstMessage(scripts.readPage(R1, "OG Pages"));
+
+test("first post without matchups: uses the host's first reply that has them, skipping other players' posts", () => {
+  const page = threadPageWithPosts([
+    { author: "Host", html: SEEDING },
+    { author: "Bob", html: "Rescheduled " + playerLink(2, "Bob") + " vs " + playerLink(1, "Alice") + ", ggs" },
+    { author: "Host", html: "Reminder: deadline is Sunday" },
+    { author: "Host", html: SWISS_1 },
+    { author: "Host", html: "Swiss Round 2<br />" + playerLink(1, "Alice") + " vs " + playerLink(3, "Cara") },
+  ]);
+  const { scripts, requests } = appsScript({ sheets: { "OG Backstage": backstage("cup-one") }, pages: smogon({ [R1]: page }) });
+  scripts.fetchOGPages();
+
+  assert.equal(storedPost(scripts), SWISS_1);
+  assert.ok(!requests.some((u) => u.startsWith(R1 + "page-")), "fetched another page although the matchups were on page 1");
+});
+
+test("matchups in a reply on a later page: fetches pages one at a time until it finds them", () => {
+  const nav = pageLink(R1, 2) + pageLink(R1, 3);
+  const pages = smogon({
+    [R1]: threadPageWithPosts([{ author: "Host", html: SEEDING }, { author: "Alice", html: "ggs" }], nav),
+    [R1 + "page-2"]: threadPageWithPosts([{ author: "Bob", html: "gl" }, { author: "Host", html: SWISS_1 }], nav),
+    [R1 + "page-3"]: threadPageWithPosts([{ author: "Host", html: "Swiss Round 2" }], nav),
+  });
+  const { scripts, requests } = appsScript({ sheets: { "OG Backstage": backstage("cup-one") }, pages });
+  scripts.fetchOGPages();
+
+  assert.equal(storedPost(scripts), SWISS_1);
+  assert.ok(requests.includes(R1 + "page-2?__scraper-token=" + TOKEN));
+  assert.ok(!requests.some((u) => u.startsWith(R1 + "page-3")), "fetched page 3 after finding the matchups on page 2");
+});
+
+test("no matchups anywhere in the thread: keeps the first post and stops at the last page", () => {
+  const nav = pageLink(R1, 2);
+  const pages = smogon({
+    [R1]: threadPageWithPosts([{ author: "Host", html: SEEDING }], nav),
+    [R1 + "page-2"]: threadPageWithPosts([{ author: "Host", html: "Delayed a week, sorry" }], nav),
+  });
+  const { scripts, requests } = appsScript({ sheets: { "OG Backstage": backstage("cup-one") }, pages });
+  scripts.fetchOGPages();
+
+  assert.equal(storedPost(scripts), SEEDING);
+  assert.deepEqual(requests.filter((u) => u.startsWith(R1 + "page-")), [R1 + "page-2?__scraper-token=" + TOKEN]);
 });

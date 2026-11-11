@@ -152,6 +152,58 @@ function fetchSmogonPages(urls, token, allow404) {
   }
   return texts;
 }
+// The posts on a thread page, in order, as {author, content}.
+function threadPosts(html) {
+  var posts = [];
+  var i = 0;
+  while ((i = html.indexOf('<article class="message message--post', i)) !== -1) {
+    var tagEnd = html.indexOf(">", i);
+    var author = html.substring(i, tagEnd).match(/data-author="([^"]*)"/);
+    var content = findCut(html, '<div class="bbWrapper">', '<div class="js-selectToQuoteEnd', i);
+    if (content !== null) {
+      posts.push({ author: author ? author[1] : "", content: content });
+    }
+    i = tagEnd;
+  }
+  return posts;
+}
+// Highest page number the thread's page links point to (1 for a single page).
+function threadPageCount(url, html) {
+  var path = url.replace("https://www.smogon.com", "") + "page-";
+  var count = 1;
+  html.split(path).slice(1).forEach(function (rest) {
+    var page = parseInt(rest, 10);
+    if (page > count) count = page;
+  });
+  return count;
+}
+// The post holding a round thread's matchups. Usually the first post; when that has none (e.g. a
+// swiss stage whose rounds the host posts as replies), the host's next post with matchups,
+// fetching later pages one at a time only as needed. Falls back to the first post.
+function roundPost(url, html, token) {
+  var first = firstMessage(html);
+  if (first === null) {
+    throw new Error("No first post found in " + url);
+  }
+  if (hasMatchups(first)) {
+    return first;
+  }
+  var posts = threadPosts(html);
+  var host = posts.length > 0 ? posts[0].author : "";
+  var pageCount = threadPageCount(url, html);
+  for (var page = 1; page <= pageCount; page++) {
+    if (page > 1) {
+      posts = threadPosts(fetchSmogonPages([url + "page-" + page], token, false)[0]);
+    }
+    for (var p = page === 1 ? 1 : 0; p < posts.length; p++) {
+      if (posts[p].author === host && hasMatchups(posts[p].content)) {
+        return posts[p].content;
+      }
+    }
+  }
+  return first;
+}
+
 // Downloads every listing page and round thread the circuit's Backstage needs and replaces the
 // pages sheet with them. The sheet is only written once everything has been fetched.
 function fetchCircuitPages(backstageSheetName, pagesSheetName) {
@@ -185,11 +237,7 @@ function fetchCircuitPages(backstageSheetName, pagesSheetName) {
     });
   });
   fetchSmogonPages(threadUrls, token, false).forEach(function (html, i) {
-    var post = firstMessage(html);
-    if (post === null) {
-      throw new Error("No first post found in " + threadUrls[i]);
-    }
-    pages.set(threadUrls[i], wrapPost(post));
+    pages.set(threadUrls[i], wrapPost(roundPost(threadUrls[i], html, token)));
   });
 
   var rows = [["URL", "CONTENT"]];
@@ -246,11 +294,8 @@ function getPlayersFromMessage(message) {
     message = message.slice(tagStart + 1);
   }
 }
-function getPlayersForRound(url, pagesSheetName) {
-  var message = firstMessage(readPage(url, pagesSheetName));
-  if (message === null) {
-    throw new Error("No first post found in " + url);
-  }
+// The part of a round post that can hold matchups: from the rules on, with seed numbers removed.
+function roundText(message) {
   var roundCutoff = message.indexOf("Rules");
   if (message.indexOf("tournament-rules-and-general-guidelines") > 1) {
     roundCutoff = message.indexOf("tournament-rules-and-general-guidelines");
@@ -259,15 +304,27 @@ function getPlayersForRound(url, pagesSheetName) {
     roundCutoff = 0;
   }
   message = message.slice(roundCutoff); //This should get rid of most of the artists
-  message = removeBullshit(message);
-  // Newer threads list every seed before the matchups. Start at the player link right before the
-  // first "vs" (Smogon may use narrow no-break spaces around it, hence \s).
+  return removeBullshit(message);
+}
+// Where the matchups start: the player link right before the first "vs" (Smogon may use narrow
+// no-break spaces around it, hence \s), or -1 if there are none.
+function matchupsStart(message) {
   var vsMatch = message.match(/\s+vs\s+/i);
-  if (vsMatch) {
-    var firstPlayerStart = message.lastIndexOf('<a href="https://www.smogon.com/forums/members/', vsMatch.index);
-    if (firstPlayerStart !== -1) {
-      message = message.slice(firstPlayerStart);
-    }
+  return vsMatch ? message.lastIndexOf('<a href="https://www.smogon.com/forums/members/', vsMatch.index) : -1;
+}
+function hasMatchups(post) {
+  return matchupsStart(roundText(post)) !== -1;
+}
+function getPlayersForRound(url, pagesSheetName) {
+  var message = firstMessage(readPage(url, pagesSheetName));
+  if (message === null) {
+    throw new Error("No first post found in " + url);
+  }
+  message = roundText(message);
+  // Newer threads list every seed before the matchups - start at the first matchup.
+  var start = matchupsStart(message);
+  if (start !== -1) {
+    message = message.slice(start);
   } else {
     console.log("No matchups found in " + url);
   }

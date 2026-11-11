@@ -4,7 +4,7 @@
 // circuitTest() runs it once for OG and once for CG.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { threadPage, forumListingPage, addForumPages, runCircuit, appsScript, diffGrids, SMOGON } = require("./harness");
+const { threadPage, threadPageWithPosts, forumListingPage, addForumPages, runCircuit, appsScript, diffGrids, SMOGON } = require("./harness");
 
 const FORUM = SMOGON + "/forums/forums/smogon-metagames-circuits.474/";
 const URL_END = "?prefix_id=412";
@@ -409,6 +409,37 @@ circuitTest("double elimination, losers round in progress: winners-bracket winne
     ["Bob", "30"],
     ["Cara", "30"],
     ["Dan", "0"],
+  ]);
+});
+
+circuitTest("matchups posted as a reply (swiss stage): the first round is read from the host's reply, not the seeding list", (c) => {
+  // The first post seeds Gus, who dropped out and was replaced by Dan before round 1.
+  const seeding = ["<b>Rules</b>", ...[alice, bob, cara, gus].map((p, i) => `#${i + 1} - ${link(p)}`)].join("<br />");
+  const wb = buildWorkbook({
+    circuit: c,
+    tournaments: [
+      {
+        title: "Ladder Tour",
+        tourStr: "ladder-tour",
+        points: [100, 50, 10],
+        rounds: [
+          threadPageWithPosts([
+            { author: "Host", html: seeding },
+            { author: "Bob", html: "can we play tomorrow?" },
+            { author: "Host", html: ["Swiss Round 1", match(alice, bob, alice), match(cara, dan, cara)].join("<br />") },
+          ]),
+          post(match(alice, cara, alice)),
+        ],
+      },
+    ],
+  });
+  const { tours } = run(wb);
+
+  assert.deepEqual(tours.map((r) => r.slice(2)), [
+    ["Alice", "100"],
+    ["Cara", "50"],
+    ["Bob", "10"],
+    ["Dan", "10"],
   ]);
 });
 

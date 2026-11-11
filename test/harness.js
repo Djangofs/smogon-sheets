@@ -247,6 +247,20 @@ function threadPage(postHtml) {
   );
 }
 
+// A thread page with several posts: [{ author, html }], oldest first. `nav` is extra page markup,
+// e.g. links to later pages.
+function threadPageWithPosts(posts, nav = "") {
+  const articles = posts
+    .map(
+      ({ author, html }) =>
+        `<article class="message message--post" data-author="${author}"><div class="message-inner">` +
+        `<article class="message-body js-selectToQuote"><div class="bbWrapper">${html}` +
+        '<div class="js-selectToQuoteEnd">&nbsp;</div></div></article></div></article>'
+    )
+    .join("\n");
+  return `<html><body>${nav}${articles}</body></html>`;
+}
+
 // A forum listing page linking to the given thread URLs (relative hrefs, as on Smogon).
 function forumListingPage(threadUrls) {
   const items = threadUrls
@@ -309,6 +323,7 @@ module.exports = {
   TOKEN,
   GATE_PAGE,
   threadPage,
+  threadPageWithPosts,
   forumListingPage,
   addForumPages,
   loadScripts,
